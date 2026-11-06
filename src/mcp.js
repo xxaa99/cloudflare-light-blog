@@ -225,7 +225,8 @@ async function executeTool(name, args, env) {
       if (cover && cover.startsWith('data:')) cover = await uploadImage(env, cover, slug);
       const now = new Date().toISOString();
       const status = args.status === 'published' ? 'published' : 'draft';
-      const published_at = args.published_at ? new Date(args.published_at).toISOString() : now;
+      const _pd = args.published_at ? new Date(args.published_at) : null;
+      const published_at = _pd && !isNaN(_pd.getTime()) ? _pd.toISOString() : now;
       const r = await env.DB.prepare(
         'INSERT INTO posts (title, slug, content, excerpt, cover_image, category, tags, status, password, created_at, updated_at, published_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)'
       ).bind(
@@ -253,7 +254,8 @@ async function executeTool(name, args, env) {
       const category = args.category !== undefined ? args.category : existing.category;
       const tags = args.tags !== undefined ? args.tags : existing.tags;
       const status = args.status !== undefined ? args.status : existing.status;
-      const excerpt = args.excerpt !== undefined ? args.excerpt : generateExcerpt(content, 200);
+      // 未传 excerpt 时：仅在正文变化时重新生成，避免只改标题也覆盖手写摘要
+      const excerpt = args.excerpt !== undefined ? args.excerpt : (args.content !== undefined ? generateExcerpt(content, 200) : existing.excerpt);
       let cover = args.cover_image !== undefined ? args.cover_image : existing.cover_image;
       if (cover && cover.startsWith('data:')) cover = await uploadImage(env, cover, String(args.id));
       const now = new Date().toISOString();

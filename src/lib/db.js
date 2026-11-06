@@ -3,7 +3,7 @@
 import { hashPassword } from './auth.js';
 
 // 库结构版本：修改 initDB 中的表结构/默认设置时递增，触发一次性迁移
-export const SCHEMA_VERSION = '2';
+export const SCHEMA_VERSION = '3';
 
 /**
  * 获取表的列信息（白名单验证防止 SQL 注入）
@@ -148,7 +148,11 @@ export async function initDB(env) {
         DB.prepare("CREATE INDEX IF NOT EXISTS idx_posts_slug ON posts(slug)"),
         DB.prepare("CREATE INDEX IF NOT EXISTS idx_posts_category ON posts(category)"),
         // 前台列表按状态过滤 + 发布时间排序
-        DB.prepare("CREATE INDEX IF NOT EXISTS idx_posts_status_published ON posts(status, published_at DESC)")
+        DB.prepare("CREATE INDEX IF NOT EXISTS idx_posts_status_published ON posts(status, published_at DESC)"),
+        // 速率限制独立表（原先存 settings，读-改-写有并发绕过，且每个 IP 一行拖慢 getSettings）
+        DB.prepare("CREATE TABLE IF NOT EXISTS rate_limits (key TEXT NOT NULL, ts INTEGER NOT NULL)"),
+        DB.prepare("CREATE INDEX IF NOT EXISTS idx_rate_limits_key_ts ON rate_limits(key, ts)"),
+        DB.prepare("DELETE FROM settings WHERE key LIKE '%\\_rate\\_%' ESCAPE '\\'")
       ]);
       console.log('[DB] 索引创建完成');
     } catch (e) {
@@ -270,7 +274,7 @@ export async function getSettings(env) {
   };
 
   try {
-    const { results } = await env.DB.prepare("SELECT key, value FROM settings").all();
+    const { results } = await env.DB.prepare("SELECT key, value FROM settings WHERE key NOT LIKE '%\\_rate\\_%' ESCAPE '\\'").all();
     if (results) {
       // 过滤速率限制等内部记录，避免污染设置数据
       results.forEach(s => {

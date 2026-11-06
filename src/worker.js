@@ -7,7 +7,7 @@ import { authenticateRequest, verifyPasswordHash } from './lib/auth.js';
 import { handleImage } from './lib/image.js';
 import { handleMcpRequest } from './mcp.js';
 import { withCache } from './lib/cache.js';
-import { handleAPI } from './api.js';
+import { handleAPI, checkRateLimit } from './api.js';
 import { getFrontendHTML } from './views/frontend.js';
 import { getPostHTML } from './views/post.js';
 import { getPasswordHTML } from './views/password.js';
@@ -385,7 +385,14 @@ async function renderPostPage(request, env, id, providedPassword, ctx) {
       authenticated = await verifyPostAuth(authMatch[1], post.password, id);
     }
     // 兼容 URL 参数（旧方式，使用哈希比较）
-    if (providedPassword) {
+    if (providedPassword && !authenticated) {
+      // 与 /api/post-auth 共用限流（原先 URL 参数方式无限流，可无限爆破文章密码）
+      const clientIP = request.headers.get('CF-Connecting-IP') || 'unknown';
+      if (!await checkRateLimit(env, 'post_auth_rate_' + clientIP + '_' + id, 5, 60 * 60 * 1000)) {
+        const limited = html('密码错误次数过多，请 1 小时后再试', 429);
+        limited.headers.set('Cache-Control', 'no-store');
+        return limited;
+      }
       authenticated = await verifyPasswordHash(providedPassword, post.password);
     }
     if (!authenticated) {

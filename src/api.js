@@ -39,24 +39,37 @@ async function purgePublicCaches(request) {
 }
 
 // ==================== 公共函数 ====================
+/**
+ * 解析发布时间：非法日期回落默认值（原先 new Date('x').toISOString() 会抛错导致 500）；
+ * 后台只提交 YYYY-MM-DD，若与原发布日期同一天则保留原时间，避免每次编辑都把时间截成 00:00 打乱排序
+ */
+function parsePublishedAt(input, fallback, existing) {
+  if (!input) return existing || fallback;
+  if (existing && /^\d{4}-\d{2}-\d{2}$/.test(input) && String(existing).startsWith(input)) return existing;
+  const d = new Date(input);
+  return isNaN(d.getTime()) ? (existing || fallback) : d.toISOString();
+}
+
 
 /**
  * 速率限制：检查并记录（合并为单次操作减少竞态窗口）
  * @returns {boolean} true=允许, false=超限
  */
 export async function checkRateLimit(env, key, maxAttempts, windowMs) {
+  // 先插入本次尝试再计数：并发请求各自都会被计入，不会出现读-改-写竞态导致的限流绕过
   try {
     const now = Date.now();
-    const row = await env.DB.prepare("SELECT value FROM settings WHERE key=?").bind(key).first();
-    let attempts = [];
-    if (row) { try { attempts = JSON.parse(row.value); } catch (e) {} }
-    // 清理过期记录
-    attempts = attempts.filter(t => now - t < windowMs);
-    if (attempts.length >= maxAttempts) return false;
-    // 记录本次尝试
-    attempts.push(now);
-    await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").bind(key, JSON.stringify(attempts)).run();
-    return true;
+    const [, , cnt] = await env.DB.batch([
+      env.DB.prepare("DELETE FROM rate_limits WHERE key=? AND ts<?").bind(key, now - windowMs),
+      env.DB.prepare("INSERT INTO rate_limits (key, ts) VALUES (?, ?)").bind(key, now),
+      env.DB.prepare("SELECT COUNT(*) AS c FROM rate_limits WHERE key=? AND ts>=?").bind(key, now - windowMs)
+    ]);
+    const c = (cnt && cnt.results && cnt.results[0] && cnt.results[0].c) || 0;
+    // 偶发清理其他过期记录（最长窗口 1 小时）
+    if (Math.random() < 0.02) {
+      env.DB.prepare("DELETE FROM rate_limits WHERE ts<?").bind(now - 2 * 60 * 60 * 1000).run().catch(() => {});
+    }
+    return c <= maxAttempts;
   } catch (e) { console.error('[RateLimit]', e.message || 'Error'); return true; }
 }
 
@@ -64,7 +77,7 @@ export async function checkRateLimit(env, key, maxAttempts, windowMs) {
  * 清除速率限制记录
  */
 async function clearRateLimit(env, key) {
-  try { await env.DB.prepare("DELETE FROM settings WHERE key=?").bind(key).run(); } catch (e) {}
+  try { await env.DB.prepare("DELETE FROM rate_limits WHERE key=?").bind(key).run(); } catch (e) {}
 }
 
 
@@ -162,7 +175,9 @@ export async function handleAPI(request, env, path) {
 
     // ========== 登录接口 ==========
     if (path === '/api/login' && method === 'POST') {
-      const body = await request.json();
+      let body;
+      try { body = await request.json(); } catch { return json({ success: false, error: '请求格式错误' }, 400); }
+      if (!body || typeof body !== 'object') return json({ success: false, error: '请求格式错误' }, 400);
       if (!env.ADMIN_PASSWORD) {
         return json({ success: false, error: '未配置管理员密码（ADMIN_PASSWORD），请先在 Cloudflare 后台设置后再登录' }, 503);
       }
@@ -615,12 +630,12 @@ async function handleRSS(request, env) {
   const siteDesc = settings.site_description || '';
 
   const { results } = await env.DB.prepare(
-    "SELECT id, title, excerpt, content, created_at, published_at, updated_at, cover_image FROM posts WHERE status IN ('published','publish') ORDER BY published_at DESC LIMIT 20"
+    "SELECT id, title, excerpt, content, password, created_at, published_at, updated_at, cover_image FROM posts WHERE status IN ('published','publish') ORDER BY published_at DESC LIMIT 20"
   ).all();
 
   const items = (results || []).map(p => {
     const link = `${baseUrl}/post/${p.id}`;
-    const desc = p.excerpt || generateExcerpt(p.content, 200);
+    const desc = p.password ? '此文章受密码保护' : (p.excerpt || generateExcerpt(p.content, 200));
     return `  <item>
     <title>${escapeHtml(p.title)}</title>
     <link>${link}</link>
@@ -666,7 +681,11 @@ async function handleCreatePost(request, env) {
   const body = await request.json();
   if (!body.title || !body.title.trim()) return errorResponse('标题不能为空', 400);
   if (!body.content || !body.content.trim()) return errorResponse('内容不能为空', 400);
-  const slug = body.slug || generateSlug(body.title);
+  // 标题相同（或全是符号导致 slug 为空）时 slug 唯一约束冲突，原先直接 500；冲突则追加随机后缀
+  let slug = body.slug || generateSlug(body.title) || 'post';
+  if (await env.DB.prepare('SELECT 1 FROM posts WHERE slug=?').bind(slug).first()) {
+    slug = slug + '-' + Math.random().toString(36).substring(2, 7);
+  }
 
   let coverImage = body.cover_image;
   if (coverImage && coverImage.startsWith('data:')) {
@@ -675,7 +694,7 @@ async function handleCreatePost(request, env) {
   }
 
   const now = new Date().toISOString();
-  const published_at = body.published_at ? new Date(body.published_at).toISOString() : now;
+  const published_at = parsePublishedAt(body.published_at, now);
 
   const result = await env.DB.prepare(`
     INSERT INTO posts (title, slug, content, excerpt, cover_image, category, tags, status, password, created_at, updated_at, published_at)
@@ -713,7 +732,8 @@ async function handleUpdatePost(request, env) {
   }
 
   const now = new Date().toISOString();
-  const published_at = body.published_at ? new Date(body.published_at).toISOString() : now;
+  const prevRow = await env.DB.prepare('SELECT published_at FROM posts WHERE id=?').bind(id).first();
+  const published_at = parsePublishedAt(body.published_at, now, prevRow && prevRow.published_at);
 
   // password 字段未提交时保持原密码不变；提交空字符串表示清除；提交明文则重新哈希
   if (body.password === undefined) {
