@@ -2,6 +2,9 @@
 
 import { hashPassword } from './auth.js';
 
+// 库结构版本：修改 initDB 中的表结构/默认设置时递增，触发一次性迁移
+export const SCHEMA_VERSION = '2';
+
 /**
  * 获取表的列信息（白名单验证防止 SQL 注入）
  */
@@ -139,10 +142,14 @@ export async function initDB(env) {
 
     // ========== 4. 创建索引 ==========
     try {
-      await DB.prepare("CREATE INDEX IF NOT EXISTS idx_posts_status ON posts(status)").run();
-      await DB.prepare("CREATE INDEX IF NOT EXISTS idx_posts_created_at ON posts(created_at DESC)").run();
-      await DB.prepare("CREATE INDEX IF NOT EXISTS idx_posts_slug ON posts(slug)").run();
-      await DB.prepare("CREATE INDEX IF NOT EXISTS idx_posts_category ON posts(category)").run();
+      await DB.batch([
+        DB.prepare("CREATE INDEX IF NOT EXISTS idx_posts_status ON posts(status)"),
+        DB.prepare("CREATE INDEX IF NOT EXISTS idx_posts_created_at ON posts(created_at DESC)"),
+        DB.prepare("CREATE INDEX IF NOT EXISTS idx_posts_slug ON posts(slug)"),
+        DB.prepare("CREATE INDEX IF NOT EXISTS idx_posts_category ON posts(category)"),
+        // 前台列表按状态过滤 + 发布时间排序
+        DB.prepare("CREATE INDEX IF NOT EXISTS idx_posts_status_published ON posts(status, published_at DESC)")
+      ]);
       console.log('[DB] 索引创建完成');
     } catch (e) {
       console.error('[DB] 索引创建失败:', e);
@@ -175,10 +182,9 @@ export async function initDB(env) {
       ['allowed_origins', '*']
     ];
 
-    // 逐条插入默认设置（避免 D1 batch 10条限制）
-    for (const [key, value] of defaultSettings) {
-      await DB.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").bind(key, value).run();
-    }
+    // 批量插入默认设置（一次往返）
+    const stmt = DB.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)");
+    await DB.batch(defaultSettings.map(([key, value]) => stmt.bind(key, value)));
 
     // ========== 6. 插入示例文章（仅在表为空时）==========
     const postCount = await DB.prepare("SELECT COUNT(*) as cnt FROM posts").first();
@@ -211,6 +217,10 @@ export async function initDB(env) {
       await DB.prepare("INSERT INTO categories (name, slug, description) VALUES (?, ?, ?)").bind('分类A', 'fenleia', '').run();
       console.log('[DB] 已添加默认分类');
     }
+
+    // 记录库结构版本，之后的冷启动只需读取设置即可跳过初始化
+    await DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_version', ?)").bind(SCHEMA_VERSION).run();
+    invalidateSettingsCache();
 
     return true;
   } catch (e) {

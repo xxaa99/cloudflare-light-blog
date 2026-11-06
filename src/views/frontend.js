@@ -450,7 +450,7 @@ export function getFrontendHTML(settings, requestUrl) {
   </script>
   <script>
   (function(){
-    var s = ${(JSON.stringify(settings.custom_js || ''))};
+    var s = ${JSON.stringify(settings.custom_js || '').replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029')};
     if(s && s.trim()){
       var d=document.createElement('div');d.innerHTML=s;
       var scripts=d.querySelectorAll('script');

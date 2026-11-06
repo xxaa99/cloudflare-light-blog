@@ -10,8 +10,8 @@ export function getAdminHTML() {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>博客管理后台</title>
   <link rel="icon" href="/icon/favicon.ico">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.4.27/vue.global.prod.min.js" crossorigin="anonymous"><\/script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/axios/1.7.2/axios.min.js" crossorigin="anonymous"><\/script>
+  <script src="/vendor/vue.global.prod.min.js"><\/script>
+  <script src="/vendor/axios.min.js"><\/script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif; background: var(--body-bg, #f8f8f0); color: var(--text-body, #725d42); }

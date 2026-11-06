@@ -2,7 +2,7 @@
 // 模块化架构 | HMAC 认证 | 分页 | 缓存 | SEO
 
 import { html, json, errorResponse, handleOptions, getCorsHeaders, escapeHtml, deriveHMACKey } from './lib/utils.js';
-import { initDB, getSettings } from './lib/db.js';
+import { initDB, getSettings, SCHEMA_VERSION } from './lib/db.js';
 import { authenticateRequest, verifyPasswordHash } from './lib/auth.js';
 import { handleImage } from './lib/image.js';
 import { handleMcpRequest } from './mcp.js';
@@ -16,9 +16,14 @@ import { getAdminHTML } from './views/admin.js';
 // 数据库初始化状态缓存
 let dbInitPromise = null;
 
-function ensureDB(env) {
+// 性能：库结构已是最新版本时跳过 initDB（原先每个新 isolate 冷启动都要串行执行约 35 条 D1 语句）
+async function ensureDB(env) {
   if (!dbInitPromise) {
-    dbInitPromise = initDB(env).catch(e => {
+    dbInitPromise = (async () => {
+      const s = await getSettings(env);
+      if (s.schema_version === SCHEMA_VERSION) return true;
+      return initDB(env);
+    })().catch(e => {
       dbInitPromise = null; // 失败时重置，允许重试
       throw e;
     });
@@ -26,8 +31,29 @@ function ensureDB(env) {
   return dbInitPromise;
 }
 
+// 安全响应头（全站）
+function withSecurityHeaders(resp) {
+  if (!resp || !resp.headers) return resp;
+  try {
+    const h = new Headers(resp.headers);
+    if (!h.has('X-Content-Type-Options')) h.set('X-Content-Type-Options', 'nosniff');
+    if (!h.has('Referrer-Policy')) h.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+    if (!h.has('X-Frame-Options')) h.set('X-Frame-Options', 'SAMEORIGIN');
+    return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: h });
+  } catch { return resp; }
+}
+
 export default {
   async fetch(request, env, ctx) {
+    const resp = await handleFetch(request, env, ctx);
+    // 101 等特殊响应（如 MCP 流）不重建
+    if (resp && resp.status >= 200 && resp.status < 600 && !resp.webSocket) return withSecurityHeaders(resp);
+    return resp;
+  }
+};
+
+async function handleFetch(request, env, ctx) {
+  {
     // 初始化数据库并获取设置
     await ensureDB(env);
     const siteSettings = await getSettings(env);
@@ -124,7 +150,7 @@ export default {
       return errorResponse('服务器错误', 500, e);
     }
   }
-};
+}
 
 // ==================== 页面处理 ====================
 

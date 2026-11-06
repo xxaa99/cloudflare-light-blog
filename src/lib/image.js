@@ -24,10 +24,16 @@ export async function handleImage(request, env, path) {
       return new Response('Not Found', { status: 404 });
     }
 
+    // 安全：按扩展名白名单决定类型，不信任上传时记录的 Content-Type；
+    // SVG 直接打开时在沙箱中渲染、不执行脚本（<img> 引用不受影响）
+    const ext = filename.split('.').pop().toLowerCase();
+    const TYPES = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', ico: 'image/x-icon', 'x-icon': 'image/x-icon', avif: 'image/avif', bmp: 'image/bmp', tiff: 'image/tiff' };
     return new Response(object.body, {
       headers: {
-        'Content-Type': object.httpMetadata?.contentType || 'image/jpeg',
-        'Cache-Control': 'public, max-age=31536000, immutable'
+        'Content-Type': TYPES[ext] || 'application/octet-stream',
+        'Cache-Control': 'public, max-age=31536000, immutable',
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'none'; img-src data:; style-src 'unsafe-inline'; sandbox"
       }
     });
   } catch (e) {

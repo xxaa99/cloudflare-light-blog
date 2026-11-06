@@ -1,6 +1,11 @@
 // ==================== 文章详情页（SEO 优化）====================
 
 import { escapeHtml, renderAdContent } from '../lib/utils.js';
+
+// 安全地把数据嵌入 <script>：转义 < 与行分隔符，防止 </script> 闭合注入
+function safeJson(v) {
+  return JSON.stringify(v).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+}
 import { getTheme } from '../themes/index.js';
 
 export function getPostHTML(post, settings, requestUrl) {
@@ -48,7 +53,7 @@ export function getPostHTML(post, settings, requestUrl) {
   <meta name="twitter:title" content="${escapeHtml(post.title)}">
   <meta name="twitter:description" content="${escapeHtml(postExcerpt)}">
   ${post.cover_image ? `<meta name="twitter:image" content="${escapeHtml(post.cover_image)}">` : ''}
-  <script type="application/ld+json">${JSON.stringify({
+  <script type="application/ld+json">${safeJson({
     "@context": "https://schema.org",
     "@type": "BlogPosting",
     "headline": post.title,
@@ -177,7 +182,9 @@ export function getPostHTML(post, settings, requestUrl) {
       footer { padding: 20px 16px; font-size: 0.8em; }
     }
   </style>
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+  <link rel="stylesheet" href="/vendor/atom-one-dark.min.css">
+  <link rel="preload" as="script" href="/vendor/marked.umd.min.js">
+  <link rel="preload" as="script" href="/vendor/purify.min.js">
 </head>
 <body>
   ${hasSidebar ? `<button class="mobile-nav-toggle" onclick="toggleNav()" aria-label="打开菜单">☰</button>
@@ -479,7 +486,7 @@ export function getPostHTML(post, settings, requestUrl) {
       });
     }
     document.addEventListener('DOMContentLoaded', async function() {
-      var raw = ${JSON.stringify((post.content || '').split('</script>').join('<\\/script>'))};
+      var raw = ${safeJson(post.content || '')};
       var fence = String.fromCharCode(96)+String.fromCharCode(96)+String.fromCharCode(96);
       var tick = String.fromCharCode(96);
       var nl = String.fromCharCode(10);
@@ -525,10 +532,10 @@ export function getPostHTML(post, settings, requestUrl) {
       }
 
       // 按需加载：marked 必需；仅当存在代码块时才加载 highlight
-      try { await loadScript('https://cdnjs.cloudflare.com/ajax/libs/marked/18.0.11/lib/marked.umd.min.js'); } catch (e) {}
-      if (codeBlocks.length > 0) {
-        try { await loadScript('https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js'); } catch (e) {}
-      }
+      // 同源自托管并行加载（不再依赖 cdnjs，且 marked/DOMPurify/highlight 同时下载）
+      var loads = [loadScript('/vendor/marked.umd.min.js'), loadScript('/vendor/purify.min.js')];
+      if (codeBlocks.length > 0) loads.push(loadScript('/vendor/highlight.min.js'));
+      await Promise.all(loads.map(function(p){ return p.catch(function(){}); }));
 
       // 第二步：用 marked 解析（代码块已被占位符替换，不会有 HTML 问题）
       var html;
@@ -556,6 +563,12 @@ export function getPostHTML(post, settings, requestUrl) {
 
       // 给所有图片添加懒加载（在插入 DOM 前）
       html = html.split('<img ').join('<img loading="lazy" ');
+      // 安全：插入前用 DOMPurify 净化，防止文章内容（含 MCP/导入写入）执行脚本；DOMPurify 未加载时退化为纯文本
+      if (typeof DOMPurify !== 'undefined' && DOMPurify.sanitize) {
+        html = DOMPurify.sanitize(html, { ADD_ATTR: ['target', 'loading'], FORBID_TAGS: ['style', 'form', 'input', 'button', 'textarea', 'select'] });
+      } else {
+        html = '<p>' + raw.split('&').join('&amp;').split('<').join('&lt;').split('>').join('&gt;').split(nl).join('<br>') + '</p>';
+      }
       document.getElementById('post-content').innerHTML = html;
 
       // 为代码块添加复制按钮
@@ -621,7 +634,7 @@ export function getPostHTML(post, settings, requestUrl) {
     var container = document.getElementById('related-posts');
     if (!container) return;
     var postId = ${post.id};
-    var tags = ${JSON.stringify(post.tags || '')};
+    var tags = ${safeJson(post.tags || '')};
     if (!tags) return;
     // 客户端 HTML 转义（防存储型 XSS）
     var escHtml = function(s) { return String(s == null ? '' : s).split('&').join('&amp;').split('<').join('&lt;').split('>').join('&gt;').split('"').join('&quot;'); };
@@ -644,7 +657,7 @@ export function getPostHTML(post, settings, requestUrl) {
   })();
 
   (function(){
-    var s = ${(JSON.stringify(settings.custom_js || ''))};
+    var s = ${JSON.stringify(settings.custom_js || '').replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029')};
     if(s && s.trim()){
       var d=document.createElement('div');d.innerHTML=s;
       var scripts=d.querySelectorAll('script');
